@@ -8,10 +8,12 @@ import {
   cursorTokenFromStorage,
   importCursorTokenFromLocalStorage,
   CURSOR_CLIENT_ID,
+  DEFAULT_CURSOR_CLIENT_VERSION,
 } from "../src/auth/cursor/storage";
 import { refreshCursorTokens } from "../src/auth/cursor/oauth";
 import {
   __buildCursorHeaders,
+  __cursorCliRecordDelta,
   __resolveCursorModel,
   __setCursorTransport,
   callCursorResponses,
@@ -143,6 +145,10 @@ test("cursor local storage import maps tokens and metadata", () => {
     "cursorAuth/cachedEmail": "cursor@example.com",
     "storage.serviceMachineId": "machine-id",
     "cursorAuth/stripeMembershipType": "pro",
+    "cursorai/serverConfig": JSON.stringify({
+      configVersion: "server-config-version",
+      clientVersionStatus: { currentClientVersion: "3.12.30" },
+    }),
   });
 
   assert.equal(token.provider, "cursor");
@@ -151,6 +157,8 @@ test("cursor local storage import maps tokens and metadata", () => {
   assert.equal(token.cursorServiceMachineId, "machine-id");
   assert.equal(token.cursorClientId, CURSOR_CLIENT_ID);
   assert.equal(token.cursorMembershipType, "pro");
+  assert.equal(token.cursorClientVersion, "3.12.30");
+  assert.equal(token.cursorConfigVersion, "server-config-version");
 });
 
 test("cursor import can read JSON storage snapshots", () => {
@@ -344,6 +352,10 @@ test("cursor request helpers build headers, frame payloads, and decode text", ()
   });
   assert.equal(request[0], 0);
   assert.ok(request.length > 5);
+  assert.ok(
+    Buffer.from(request).includes(Buffer.from(DEFAULT_CURSOR_CLIENT_VERSION)),
+    "request environment_info should carry the current Cursor version",
+  );
 
   assert.equal(
     decodeCursorText(connectProtoTextFrame("hello from cursor")),
@@ -369,6 +381,10 @@ test("__resolveCursorModel strips routing prefix and passes Cursor SKUs through"
     "composer-2-fast",
   );
   assert.equal(__resolveCursorModel("cr/gpt-5.5-medium"), "gpt-5.5-medium");
+  assert.equal(
+    __resolveCursorModel("cursor-grok-4.5-medium"),
+    "cursor-grok-4.5-medium",
+  );
   assert.equal(__resolveCursorModel("cursor:default"), "default");
   assert.equal(__resolveCursorModel(""), "default");
 });
@@ -385,6 +401,34 @@ test("__resolveCursorModel honours CURSOR_MODEL_ALIASES env override", () => {
     if (prev === undefined) delete process.env.CURSOR_MODEL_ALIASES;
     else process.env.CURSOR_MODEL_ALIASES = prev;
   }
+});
+
+test("cursor-agent NDJSON records map to text, reasoning, and errors", () => {
+  assert.deepEqual(
+    __cursorCliRecordDelta(
+      { type: "thinking", subtype: "delta", text: "reasoning" },
+      false,
+    ),
+    { reasoningDelta: "reasoning" },
+  );
+  assert.deepEqual(
+    __cursorCliRecordDelta(
+      {
+        type: "assistant",
+        timestamp_ms: 1,
+        message: { content: [{ type: "text", text: "answer" }] },
+      },
+      false,
+    ),
+    { textDelta: "answer" },
+  );
+  assert.deepEqual(
+    __cursorCliRecordDelta(
+      { type: "result", subtype: "error", is_error: true, result: "failed" },
+      false,
+    ),
+    { error: "failed" },
+  );
 });
 
 test("cursor decoder splits reasoning from final text", () => {

@@ -657,9 +657,14 @@ test("waitForCallback serves success HTML inline (no 302 to closed server)", asy
 // ══════════════════════════════════════════════════
 
 import {
+  DEFAULT_CLI_VERSION,
   normalizeCodexCompactBody,
   normalizeCodexResponsesBody,
 } from "../src/upstream/codex-api";
+
+test("Codex model discovery uses a bare semantic client version", () => {
+  assert.match(DEFAULT_CLI_VERSION, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
+});
 
 test("normalizeCodexResponsesBody fills missing required fields", () => {
   const out = normalizeCodexResponsesBody({
@@ -687,6 +692,29 @@ test("normalizeCodexResponsesBody preserves explicit values", () => {
   assert.equal(out.stream, false);
   assert.equal(out.store, true);
   assert.equal(out.instructions, "custom prompt");
+});
+
+test("normalizeCodexResponsesBody expands gpt-5.6 effort presets", () => {
+  assert.deepEqual(
+    normalizeCodexResponsesBody({
+      model: "gpt-5.6-luna-high",
+      input: "hello",
+    }),
+    {
+      model: "gpt-5.6-luna",
+      input: "hello",
+      reasoning: { effort: "high" },
+      stream: true,
+      store: false,
+      instructions: "",
+    },
+  );
+  const explicit = normalizeCodexResponsesBody({
+    model: "gpt-5.6-terra-max",
+    reasoning: { effort: "low", summary: "auto" },
+  });
+  assert.equal(explicit.model, "gpt-5.6-terra");
+  assert.deepEqual(explicit.reasoning, { effort: "low", summary: "auto" });
 });
 
 test("normalizeCodexResponsesBody handles empty/non-object input safely", () => {
@@ -1068,7 +1096,10 @@ function makeNotifyConfig(): Config2 {
 }
 
 function withFetchStub(
-  stub: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+  stub: (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => Promise<Response>,
 ): () => void {
   const orig = globalThis.fetch;
   globalThis.fetch = stub as typeof fetch;
@@ -1102,10 +1133,10 @@ test("notifyServerReload posts to /admin/reload with the first api-key as Bearer
   let seen: { url: string; init?: RequestInit } | null = null;
   const restoreFetch = withFetchStub(async (input, init) => {
     seen = { url: String(input), init };
-    return new Response(
-      JSON.stringify({ reloaded: {}, generated_at: "now" }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ reloaded: {}, generated_at: "now" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
   });
   const cap = captureLogs();
   try {
@@ -1121,7 +1152,9 @@ test("notifyServerReload posts to /admin/reload with the first api-key as Bearer
     (seen!.init?.headers as Record<string, string>)?.Authorization,
     "Bearer sk-test",
   );
-  assert.ok(cap.logs.some((l) => l.includes("Notified running auth2api server")));
+  assert.ok(
+    cap.logs.some((l) => l.includes("Notified running auth2api server")),
+  );
   assert.equal(cap.warns.length, 0);
 });
 

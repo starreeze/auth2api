@@ -1,6 +1,9 @@
 import { gunzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import http2 from "node:http2";
+import readline from "node:readline";
 import { Request } from "express";
 import { v4 as uuidv4, v5 as uuidv5 } from "uuid";
 import { AccountManager, AvailableAccount } from "../accounts/manager";
@@ -344,7 +347,10 @@ const PUBLIC_MODEL_TO_CURSOR: Record<string, string> = {
  *   3. otherwise keep the trimmed name verbatim — it's already a Cursor SKU
  */
 function normaliseModel(model: string): string {
-  const stripped = model.replace(/^(cursor[:/-]|cr\/)/i, "").trim();
+  const trimmed = model.trim();
+  const explicitRoute = /^(cursor[:/]|cr\/)/i.test(trimmed);
+  const cursorDashRoute = /^cursor-/i.test(trimmed);
+  const stripped = trimmed.replace(/^(cursor[:/-]|cr\/)/i, "").trim();
   if (!stripped) return "default";
   const lower = stripped.toLowerCase();
   if (PUBLIC_MODEL_TO_CURSOR[lower]) return PUBLIC_MODEL_TO_CURSOR[lower];
@@ -352,6 +358,20 @@ function normaliseModel(model: string): string {
   // without forking. Format: `MODEL_FOO=cursor-bar,MODEL_BAZ=cursor-qux`.
   const overrides = parseModelAliases(process.env.CURSOR_MODEL_ALIASES);
   if (overrides[lower]) return overrides[lower];
+  // Some real Cursor server SKUs now begin with `cursor-` (for example
+  // `cursor-grok-4.5-medium`). Preserve that namespace when the suffix is not
+  // one of our public-name aliases. `cursor:` / `cursor/` and `cr/` remain
+  // unambiguous routing-only prefixes and are always removed.
+  const legacyRoutingSuffix = /^(default|premium|fast|composer(?:-|$))/i.test(
+    stripped,
+  );
+  if (
+    cursorDashRoute &&
+    !explicitRoute &&
+    !legacyRoutingSuffix
+  ) {
+    return trimmed;
+  }
   return stripped;
 }
 
@@ -471,7 +491,7 @@ function encodeCursorSetting(): Uint8Array {
   ]);
 }
 
-function encodeMetadata(): Uint8Array {
+function encodeMetadata(cursorVersion: string): Uint8Array {
   // Reverse-engineered Metadata fields. Keep static so cloaking decisions stay
   // visible at a single configuration point and not rotated per request.
   return concatBytes([
@@ -480,6 +500,7 @@ function encodeMetadata(): Uint8Array {
     encodeBytesField(3, process.version.replace(/^v/, "")),
     encodeBytesField(4, process.execPath),
     encodeBytesField(5, new Date().toISOString()),
+    encodeBytesField(7, cursorVersion),
   ]);
 }
 
@@ -493,7 +514,10 @@ export function encodeCursorAgentRequest(body: any): Uint8Array {
   return encodeCursorChatRequest(body).bytes;
 }
 
-export function encodeCursorChatRequest(body: any): CursorRequestEncoding {
+export function encodeCursorChatRequest(
+  body: any,
+  cursorVersion = DEFAULT_CURSOR_CLIENT_VERSION,
+): CursorRequestEncoding {
   const model = normaliseModel(String(body?.model || "default"));
   const messages = messagesFromBody(body);
   const conversationId = uuidv4();
@@ -520,7 +544,7 @@ export function encodeCursorChatRequest(body: any): CursorRequestEncoding {
     encodeBytesField(15, encodeCursorSetting()),
     encodeVarintField(19, 1),
     encodeBytesField(23, conversationId),
-    encodeBytesField(26, encodeMetadata()),
+    encodeBytesField(26, encodeMetadata(cursorVersion)),
     encodeVarintField(27, 1),
   ]);
   for (const entry of messageEntries) {
@@ -636,6 +660,17 @@ export function __buildCursorHeaders(
     "x-session-id": sessionId,
     "x-request-id": uuidv4(),
   };
+}
+
+function resolveCursorClientVersion(
+  account: AvailableAccount,
+  config: Config,
+): string {
+  return (
+    config.cloaking.cursor?.["client-version"] ||
+    account.token.cursorClientVersion ||
+    DEFAULT_CURSOR_CLIENT_VERSION
+  );
 }
 
 function decodeVarint(data: Uint8Array, pos: number): [number, number] {
@@ -1178,6 +1213,159 @@ type DeltaItem =
   | { textDelta: string; reasoningDelta: string; __done?: undefined }
   | DeltaTerminator;
 
+interface CursorCliRecord {
+  type?: string;
+  subtype?: string;
+  text?: string;
+  timestamp_ms?: number;
+  is_error?: boolean;
+  result?: string;
+  message?: {
+    content?: Array<{ type?: string; text?: string }>;
+  };
+}
+
+export function __cursorCliRecordDelta(
+  record: CursorCliRecord,
+  hasText: boolean,
+): { textDelta?: string; reasoningDelta?: string; error?: string } {
+  if (record.type === "thinking" && record.subtype === "delta") {
+    return { reasoningDelta: record.text || "" };
+  }
+  if (record.type === "assistant" && record.timestamp_ms !== undefined) {
+    const text = (record.message?.content || [])
+      .filter((part) => part.type === "text")
+      .map((part) => part.text || "")
+      .join("");
+    return { textDelta: text };
+  }
+  if (record.type === "result") {
+    if (record.is_error || record.subtype !== "success") {
+      return { error: record.result || "Cursor Agent request failed" };
+    }
+    // stream-partial-output normally emitted the answer already. Some CLI
+    // versions only put it on the terminal result, so retain that fallback.
+    if (!hasText && record.result) return { textDelta: record.result };
+  }
+  return {};
+}
+
+function deltaItemsToSseResponse(
+  model: string,
+  format: CursorSseFormat,
+  src: AsyncGenerator<DeltaItem>,
+  cancel?: () => void,
+): Response {
+  let generator: AsyncGenerator<string>;
+  if (format === "anthropic-messages") {
+    generator = anthropicMessagesGenerator(model, src);
+  } else if (format === "openai-chat-completions") {
+    generator = openaiChatCompletionsGenerator(model, src);
+  } else {
+    generator = openaiResponsesGenerator(model, src);
+  }
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          for await (const event of generator) {
+            controller.enqueue(encoder.encode(event));
+          }
+          controller.close();
+        } catch (err) {
+          controller.error(err);
+        }
+      },
+      cancel() {
+        cancel?.();
+        void generator.return?.(undefined);
+      },
+    }),
+    { status: 200, headers: { "Content-Type": "text/event-stream" } },
+  );
+}
+
+async function callCursorAgentCli(
+  body: any,
+  format: CursorSseFormat,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const model = normaliseModel(String(body?.model || "default"));
+  const prompt = textFromResponsesInput(body);
+  const executable = process.env.CURSOR_AGENT_PATH || "cursor-agent";
+  const child = spawn(
+    executable,
+    [
+      "-p",
+      "--trust",
+      "--mode",
+      "ask",
+      "--output-format",
+      "stream-json",
+      "--stream-partial-output",
+      "--model",
+      model,
+      prompt,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const closed = new Promise<number | null>((resolve) => {
+    child.once("close", resolve);
+  });
+  await once(child, "spawn");
+
+  const stderr: Buffer[] = [];
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  const abort = () => child.kill("SIGTERM");
+  signal?.addEventListener("abort", abort, { once: true });
+
+  async function* deltas(): AsyncGenerator<DeltaItem> {
+    let aggregatedText = "";
+    let aggregatedReasoning = "";
+    let error: string | undefined;
+    const lines = readline.createInterface({ input: child.stdout });
+    try {
+      for await (const line of lines) {
+        if (!line.trim()) continue;
+        const record = JSON.parse(line) as CursorCliRecord;
+        const delta = __cursorCliRecordDelta(record, aggregatedText.length > 0);
+        if (delta.reasoningDelta) aggregatedReasoning += delta.reasoningDelta;
+        if (delta.textDelta) aggregatedText += delta.textDelta;
+        if (delta.error) error = delta.error;
+        if (delta.textDelta || delta.reasoningDelta) {
+          yield {
+            textDelta: delta.textDelta || "",
+            reasoningDelta: delta.reasoningDelta || "",
+          };
+        }
+      }
+      const exitCode = await closed;
+      if (exitCode !== 0 && !error) {
+        error =
+          Buffer.concat(stderr).toString("utf8").trim().slice(0, 500) ||
+          `Cursor Agent exited with code ${exitCode}`;
+      }
+      yield {
+        __done: true,
+        aggregatedText,
+        aggregatedReasoning,
+        error,
+      };
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      if (child.exitCode === null) child.kill("SIGTERM");
+    }
+  }
+
+  return deltaItemsToSseResponse(
+    String(body?.model || model),
+    format,
+    deltas(),
+    abort,
+  );
+}
+
 async function* openaiResponsesGenerator(
   model: string,
   src: AsyncGenerator<DeltaItem>,
@@ -1560,6 +1748,18 @@ export async function callCursorResponses(
 ): Promise<Response> {
   const { account, config } = options;
   const body = normalizeCursorResponsesBody(options.body ?? options.request.body);
+  const responseFormat = options.responseFormat || "openai-responses";
+  // Cursor retired the reverse-engineered ChatService protocol in current
+  // clients. The maintained local Cursor Agent already speaks AgentService
+  // and uses the same signed-in desktop account, so prefer it for production
+  // local use. Transport-injected unit tests and CURSOR_TRANSPORT=legacy keep
+  // exercising the deterministic legacy codec.
+  if (
+    cursorTransport === http2Post &&
+    process.env.CURSOR_TRANSPORT !== "legacy"
+  ) {
+    return callCursorAgentCli(body, responseFormat, options.signal);
+  }
   // Cursor's chat is reverse-engineered to live at api2.cursor.sh. We expose
   // both legacy "agent-base-url" and "api-base-url" config keys so users can
   // override the host without forcing a code change.
@@ -1582,7 +1782,10 @@ export async function callCursorResponses(
   // forever (the express layer only aborts on client disconnect).
   // Mirrors how `anthropic-api.ts` wraps fetch() with withTimeoutSignal.
   const effectiveSignal = withTimeoutSignal(totalTimeoutMs, options.signal);
-  const encoded = encodeCursorChatRequest(body);
+  const encoded = encodeCursorChatRequest(
+    body,
+    resolveCursorClientVersion(account, config),
+  );
 
   // Cursor's chat endpoint is HTTP/2-only and rejects HTTP/1.1 requests with
   // a custom 464 status. Node's fetch (undici) does not negotiate HTTP/2 by
@@ -1612,7 +1815,7 @@ export async function callCursorResponses(
   return cursorUpstreamToSse(
     upstream,
     String(body.model || "cursor-default"),
-    options.responseFormat || "openai-responses",
+    responseFormat,
   );
 }
 
@@ -1633,18 +1836,38 @@ export async function listCursorModels(
   const account = result.account;
   const url = `${cfg.cloaking.cursor?.["api-base-url"] || DEFAULT_API_BASE_URL}${MODELS_PATH}`;
   try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        ...__buildCursorHeaders(account, cfg),
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: "{}",
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!resp.ok) throw new Error(`status ${resp.status}`);
-    const parsed = (await resp.json()) as { models?: Array<Record<string, unknown>> };
+    const headers = {
+      ...__buildCursorHeaders(account, cfg),
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+    // AvailableModels is a unary HTTP/2 endpoint. A regular fetch negotiates
+    // HTTP/1.1 and the previous Connect-framed media type is rejected with
+    // 415, so use the same HTTP/2 transport as chat with an unframed JSON body.
+    const h2 = await cursorTransport(
+      url,
+      headers,
+      Buffer.from("{}"),
+      10_000,
+      AbortSignal.timeout(10_000),
+    );
+    if (h2.status < 200 || h2.status >= 300) {
+      throw new Error(`status ${h2.status}`);
+    }
+    let bytes = new Uint8Array(
+      await new Response(
+        bodyToReadableStream(h2.body) as unknown as BodyInit,
+      ).arrayBuffer(),
+    );
+    if (
+      h2.headers["content-encoding"] === "gzip" ||
+      (bytes[0] === 0x1f && bytes[1] === 0x8b)
+    ) {
+      bytes = gunzipSync(bytes);
+    }
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as {
+      models?: Array<Record<string, unknown>>;
+    };
     const ids = extractCursorModelIds(parsed);
     if (ids.length) return ids.map((id) => ({ id, owned_by: "cursor" }));
   } catch (err: any) {

@@ -13,7 +13,7 @@ const DEFAULT_ORIGINATOR = "codex_cli_rs";
 // older versions with "requires a newer version of Codex". Matches latest
 // @openai/codex on npm at the time of writing. Override via
 // `cloaking.codex.cli-version` if upstream's minimum changes again.
-const DEFAULT_CLI_VERSION = "0.125.0";
+export const DEFAULT_CLI_VERSION = "0.146.0";
 
 function buildUserAgent(config: Config): string {
   const codex = config.cloaking.codex || {};
@@ -84,6 +84,19 @@ function buildHeaders(
 export function normalizeCodexResponsesBody(body: any): any {
   if (!body || typeof body !== "object") return body;
   const next: any = { ...body };
+  const preset =
+    /^((?:gpt-5\.6)-(?:sol|terra|luna))-(low|medium|high|xhigh|max)$/i.exec(
+      String(next.model || ""),
+    );
+  if (preset) {
+    next.model = preset[1].toLowerCase();
+    if (next.reasoning?.effort === undefined) {
+      next.reasoning = {
+        ...(next.reasoning || {}),
+        effort: preset[2].toLowerCase(),
+      };
+    }
+  }
   if (next.stream === undefined) next.stream = true;
   if (next.store === undefined) next.store = false;
   if (next.instructions === undefined) next.instructions = "";

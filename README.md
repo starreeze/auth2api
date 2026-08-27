@@ -81,7 +81,7 @@ You can run `--login` multiple times to add additional accounts (per provider). 
 
 > **Note on Codex:** The codex provider relays your ChatGPT Plus/Pro subscription quota. OpenAI's ToS does not officially permit relaying ChatGPT sessions through third-party tools — use this for your own personal local consumption only.
 
-> **Note on Cursor:** The cursor provider is a research-only integration built from non-public, reverse-engineered Cursor APIs (`api2.cursor.sh` over HTTP/2, Connect-RPC + protobuf). It may break when Cursor changes client versions, may violate Cursor's terms, and should be used only for local personal experiments.
+> **Note on Cursor:** Current Cursor requests run through the installed `cursor-agent` executable in read-only `ask` mode, using its existing local login and maintained AgentService protocol. Ensure `cursor-agent` is on `PATH`, or set `CURSOR_AGENT_PATH` to its absolute path. This remains an unofficial personal-local integration and may be affected by Cursor client or terms changes.
 
 ## Starting the server
 
@@ -125,12 +125,12 @@ debug: "off" # off | errors | verbose
 - `errors`: log upstream/network failures and upstream error bodies
 - `verbose`: include `errors` logs plus per-request method, path, status, and duration
 
-Cursor's reverse-engineered headers can be overridden if the upstream version gate changes. `agent-base-url` is the legacy alias for the chat host; both keys point at the same backend now (`api2.cursor.sh`).
+The settings below apply to the retained legacy HTTP/2 codec (`CURSOR_TRANSPORT=legacy`). Normal operation uses the installed Cursor Agent and does not need protocol-header overrides.
 
 ```yaml
 cloaking:
   cursor:
-    client-version: "2.3.41"
+    client-version: "3.12.30"
     client-type: "ide"
     agent-base-url: "https://api2.cursor.sh"
     api-base-url: "https://api2.cursor.sh"
@@ -162,6 +162,9 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 | `claude-sonnet-4-6`                                  | anthropic | Claude Sonnet 4.6                                  |
 | `claude-haiku-4-5-20251001`                          | anthropic | Claude Haiku 4.5                                   |
 | `claude-haiku-4-5`                                   | anthropic | Alias for Claude Haiku 4.5                         |
+| `gpt-5.6-sol`                                        | codex     | GPT-5.6 Sol                                        |
+| `gpt-5.6-terra`                                      | codex     | GPT-5.6 Terra                                      |
+| `gpt-5.6-luna`                                       | codex     | GPT-5.6 Luna                                       |
 | `gpt-5.5`                                            | codex     | GPT-5.5 (reasoning model)                          |
 | `gpt-5.4`                                            | codex     | GPT-5.4                                            |
 | `gpt-5.4-mini`                                       | codex     | GPT-5.4 Mini                                       |
@@ -176,6 +179,7 @@ Short convenience aliases accepted by auth2api:
 
 - `opus` -> `claude-opus-4-7`
 - `sonnet` -> `claude-sonnet-4-6`
+- `gpt-5.6-{sol,terra,luna}-{low,medium,high,xhigh,max}` -> the base Codex model plus the selected reasoning effort
 - `haiku` -> `claude-haiku-4-5-20251001`
 
 Routing: requests are dispatched to the matching pool by model name. `claude-*` and the bare aliases (`opus`/`sonnet`/`haiku`) hit your Claude account; `gpt-5*`, `o\d` (`o3`, `o4-mini`, …), and `codex-*` hit your Codex account; `cursor-*` and `cr/*` hit your Cursor account. Other model families (`gpt-3.5-*`, `gpt-4*`, …) are not served by either backend and route to anthropic by default. If you haven't logged into the matching provider, the request returns `503 no_account_for_provider` with the exact `--login` command to fix it.
@@ -224,9 +228,9 @@ Off-the-shelf OpenAI Responses / Chat / Claude Code clients all just work withou
 
 #### Cursor `/v1/responses` limitations
 
-Cursor's chat protocol is reverse-engineered: requests go to `api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools` over HTTP/2 + `application/connect+proto`, and the response is decoded back into OpenAI Responses SSE deltas. Stream is forced on (Cursor only supports streaming). Tool calls, images, repository context, edit actions, and Cursor's richer agent protocol are intentionally not translated yet — only single-turn streaming text is supported.
+Cursor retired the old ChatService protocol. auth2api now invokes the locally installed `cursor-agent` with the selected model, read-only `ask` mode, and NDJSON streaming, then converts its text and reasoning deltas into OpenAI Responses SSE. Tool calls, images, repository context, and edit actions are intentionally not exposed — this adapter remains single-turn streaming text only.
 
-The decoder routes Cursor's chain-of-thought (`reasoning`) bytes to `response.reasoning_summary_text.delta` events instead of leaking them into the main `response.output_text.delta` stream. For Composer/Kimi-style models that stream the entire response (CoT + answer) through a single reasoning channel, the decoder splits on the first `</think>` marker so the final answer still surfaces as plain `output_text`.
+The adapter routes Cursor Agent thinking records to `response.reasoning_summary_text.delta` and assistant records to `response.output_text.delta`.
 
 ### Endpoints
 

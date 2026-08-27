@@ -7,7 +7,7 @@ import { TokenData } from "../types";
 import { decodeJwtPayload } from "../../utils/jwt";
 
 export const CURSOR_CLIENT_ID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
-export const DEFAULT_CURSOR_CLIENT_VERSION = "cli-2026.01.09-231024f";
+export const DEFAULT_CURSOR_CLIENT_VERSION = "3.12.30";
 
 const CURSOR_KEYS = [
   "cursorAuth/accessToken",
@@ -19,6 +19,7 @@ const CURSOR_KEYS = [
   "cursorAuth/clientId",
   "cursorAuth/clientVersion",
   "cursorAuth/configVersion",
+  "cursorai/serverConfig",
 ];
 
 type CursorStorageMap = Record<string, string>;
@@ -136,6 +137,12 @@ export function cursorTokenFromStorage(
     storage["storage.serviceMachineId"] ||
     overrides.cursorServiceMachineId ||
     uuidv4();
+  const serverConfig = storage["cursorai/serverConfig"]
+    ? (JSON.parse(storage["cursorai/serverConfig"]) as {
+        configVersion?: string;
+        clientVersionStatus?: { currentClientVersion?: string };
+      })
+    : {};
 
   return {
     accessToken,
@@ -147,10 +154,12 @@ export function cursorTokenFromStorage(
     cursorServiceMachineId: serviceMachineId,
     cursorClientVersion:
       storage["cursorAuth/clientVersion"] ||
+      serverConfig.clientVersionStatus?.currentClientVersion ||
       overrides.cursorClientVersion ||
       DEFAULT_CURSOR_CLIENT_VERSION,
     cursorConfigVersion:
       storage["cursorAuth/configVersion"] ||
+      serverConfig.configVersion ||
       overrides.cursorConfigVersion ||
       uuidv4(),
     cursorClientId:

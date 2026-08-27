@@ -1,9 +1,9 @@
 import { AccountManager } from "../accounts/manager";
+import { DEFAULT_CLI_VERSION } from "./codex-api";
 
 const BASE_URL = "https://chatgpt.com/backend-api";
 const MODELS_PATH = "/codex/models";
 const CACHE_TTL_MS = 5 * 60 * 1000; // matches codex-rs/models-manager DEFAULT_MODEL_CACHE_TTL
-const CLIENT_VERSION = "auth2api/1.0.0";
 
 // Static fallback used when no account is loaded or the upstream /codex/models
 // call fails. User-confirmed list of models currently accepted by the
@@ -42,11 +42,11 @@ async function fetchUpstream(
   if (!result.account) return null;
   const account = result.account;
 
-  const url = `${BASE_URL}${MODELS_PATH}?client_version=${encodeURIComponent(CLIENT_VERSION)}`;
+  const url = `${BASE_URL}${MODELS_PATH}?client_version=${encodeURIComponent(DEFAULT_CLI_VERSION)}`;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${account.token.accessToken}`,
     Accept: "application/json",
-    "User-Agent": `auth2api/1.0.0`,
+    "User-Agent": `codex_cli_rs/${DEFAULT_CLI_VERSION}`,
   };
   if (account.chatgptAccountId) {
     headers["ChatGPT-Account-ID"] = account.chatgptAccountId;

@@ -51,16 +51,16 @@ cloaking:
   # `npm view @openai/codex version` shows the current released version.
   codex:
     # Full User-Agent string, takes precedence over the components below.
-    # user-agent: "codex_cli_rs/0.125.0 (macos; arm64)"
+    # user-agent: "codex_cli_rs/0.146.0 (macos; arm64)"
     originator: "codex_cli_rs"
-    cli-version: "0.125.0"
+    cli-version: "0.146.0"
     # Set only if the upstream begins requiring an OpenAI-Beta header.
     # openai-beta: "responses=experimental"
 
   # Cursor provider — experimental, reverse-engineered, and not official.
   # Override these only when Cursor changes its internal version gates.
   cursor:
-    client-version: "2.3.41"
+    client-version: "3.12.30"
     client-type: "ide"
     # agent-base-url is the legacy alias; both keys point at api2.cursor.sh now.
     agent-base-url: "https://api2.cursor.sh"

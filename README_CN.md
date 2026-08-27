@@ -81,7 +81,7 @@ node dist/index.js --login --provider=codex --manual
 
 > **关于 Codex：** codex provider 中转的是你的 ChatGPT Plus/Pro 订阅额度。OpenAI 的 ToS 不允许通过第三方工具中转 ChatGPT 会话 —— 仅供本地个人自用。
 
-> **关于 Cursor：** cursor provider 是研究性质集成，依赖非公开、逆向得到的 Cursor API（`api2.cursor.sh` 上的 HTTP/2 + Connect-RPC + protobuf）。Cursor 升级后可能随时失效，也可能违反 Cursor 服务条款或触发账号风险；仅建议本地个人实验使用。
+> **关于 Cursor：** 当前 Cursor 请求通过本机已安装的 `cursor-agent` 以只读 `ask` 模式执行，复用现有本地登录态和官方维护的 AgentService 协议。请确保 `cursor-agent` 在 `PATH` 中，或用 `CURSOR_AGENT_PATH` 指定绝对路径。该集成仍非官方，仅建议本地个人使用。
 
 ## 启动服务
 
@@ -125,12 +125,12 @@ debug: "off" # off | errors | verbose
 - `errors`：记录上游/网络失败信息和上游错误响应正文
 - `verbose`：在 `errors` 基础上，再输出每个请求的方法、路径、状态码和耗时
 
-如果 Cursor 上游版本门禁变化，可以覆盖这些实验性请求头。`agent-base-url` 是 chat host 的兼容别名，目前与 `api-base-url` 都指向 `api2.cursor.sh`：
+以下设置仅用于保留的旧版 HTTP/2 codec（`CURSOR_TRANSPORT=legacy`）。正常运行使用本机 Cursor Agent，不需要覆盖协议请求头：
 
 ```yaml
 cloaking:
   cursor:
-    client-version: "2.3.41"
+    client-version: "3.12.30"
     client-type: "ide"
     agent-base-url: "https://api2.cursor.sh"
     api-base-url: "https://api2.cursor.sh"
@@ -162,6 +162,9 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 | `claude-sonnet-4-6`                                  | anthropic | Claude Sonnet 4.6                            |
 | `claude-haiku-4-5-20251001`                          | anthropic | Claude Haiku 4.5                             |
 | `claude-haiku-4-5`                                   | anthropic | Claude Haiku 4.5 别名                        |
+| `gpt-5.6-sol`                                        | codex     | GPT-5.6 Sol                                  |
+| `gpt-5.6-terra`                                      | codex     | GPT-5.6 Terra                                |
+| `gpt-5.6-luna`                                       | codex     | GPT-5.6 Luna                                 |
 | `gpt-5.5`                                            | codex     | GPT-5.5(reasoning model)                     |
 | `gpt-5.4`                                            | codex     | GPT-5.4                                      |
 | `gpt-5.4-mini`                                       | codex     | GPT-5.4 Mini                                 |
@@ -176,6 +179,7 @@ auth2api 额外支持以下便捷别名：
 
 - `opus` -> `claude-opus-4-7`
 - `sonnet` -> `claude-sonnet-4-6`
+- `gpt-5.6-{sol,terra,luna}-{low,medium,high,xhigh,max}` -> Codex 基础模型加对应 reasoning effort
 - `haiku` -> `claude-haiku-4-5-20251001`
 
 路由规则：根据模型名自动选择账号池。`claude-*` 与裸别名 `opus`/`sonnet`/`haiku` 走 Claude 账号；`gpt-5*`、`o\d`(`o3`、`o4-mini` 等)、`codex-*` 走 Codex 账号；`cursor-*` 和 `cr/*` 走 Cursor 账号。其它型号(`gpt-3.5-*`、`gpt-4*` 等)两个后端都不支持，默认 fallback 到 anthropic。如果对应 provider 未登录，请求会返回 `503 no_account_for_provider`，错误信息中带有需要执行的 `--login` 命令。
@@ -224,9 +228,9 @@ OpenAI Responses / Chat / Claude Code 客户端无需关心 codex 的特殊行�
 
 #### Cursor `/v1/responses` 限制
 
-Cursor 的 chat 协议是逆向得到的：请求走 `api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools`，HTTP/2 + `application/connect+proto`，响应被解码后再转换回 OpenAI Responses SSE delta。Cursor 只支持流式，所以 `stream` 会被强制开启。当前仅覆盖单轮流式文本：工具调用、图片、仓库上下文、编辑动作以及 Cursor 更完整的 agent 协议暂不转换。
+Cursor 已停用旧 ChatService 协议。auth2api 现在用所选模型调用本机 `cursor-agent`，采用只读 `ask` 模式和 NDJSON 流，再把文本与推理 delta 转成 OpenAI Responses SSE。工具调用、图片、仓库上下文和编辑动作不会暴露；当前仍只支持单轮流式文本。
 
-Decoder 会把 Cursor 上游的 chain-of-thought（reasoning）字节路由到 `response.reasoning_summary_text.delta` 事件，避免污染主 `response.output_text.delta`。对于 Composer / Kimi 这种把整段（思考 + 答案）都塞进 reasoning 通道的模型，decoder 会按第一处 `</think>` 标签拆分——前面留在 reasoning，后面回到正文 `output_text`。
+适配器会把 Cursor Agent 的 thinking 记录路由到 `response.reasoning_summary_text.delta`，并把 assistant 记录路由到 `response.output_text.delta`。
 
 ### 接口列表
 
